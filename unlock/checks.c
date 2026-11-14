@@ -26,9 +26,13 @@ BOOLEAN GuCheckConfig(const UINT32 Config[64], UINTN Segment, UINTN Bus,
 
   if (Out == NULL) return FALSE;
   *Out = Caps;
-  if (Config == NULL || Segment != 0 || Bus != 1 || Device != 0 || Function != 0)
+  /* PORT-DIAG (2026-10-25): Bus/Device/Function and subsystem pins removed.
+     The card is identified by GU_BOARD_ID (0x220410de) plus class/header and
+     full capability-table structure validation. Subsystem is logged by the
+     caller instead of being matched against one machine's value. */
+  if (Config == NULL || Segment != 0)
     return FALSE;
-  if (Config[0] != GU_BOARD_ID || Config[0x2c / 4] != GU_BOARD_SUBSYSTEM ||
+  if (Config[0] != GU_BOARD_ID ||
       ConfigByte(Config, 0x0b) != PCI_CLASS_DISPLAY ||
       (ConfigByte(Config, PCI_HEADER_TYPE_OFFSET) & 0x7fU) != HEADER_TYPE_DEVICE)
     return FALSE;
@@ -168,6 +172,9 @@ int GuDisplayPath(const EFI_DEVICE_PATH_PROTOCOL *Path, UINTN MaxBytes) {
     Route = 1;
   } else if (TakePci(&Bytes, &MaxBytes, 1, 1) && TakePci(&Bytes, &MaxBytes, 0, 0)) {
     Route = 2;
+  } else if (TakePci(&Bytes, &MaxBytes, 2, 0)) {
+    /* PORT-DIAG: Intel UHD 770 GOP path is PciRoot/Pci(2,0)/AcpiAdr... */
+    Route = 3;
   } else {
     return 0;
   }

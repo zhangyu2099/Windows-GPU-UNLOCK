@@ -53,8 +53,12 @@ VOID GuInit(EFI_BOOT_SERVICES *Bs, EFI_PCI_IO_PROTOCOL *Pci) {
 #endif
 }
 BOOLEAN GuTargetConfig(const UINT32 *C, UINTN S, UINTN B, UINTN D, UINTN F) {
-  return C && !S && B==1 && !D && !F && C[0]==GU_BOARD_ID &&
-    C[11]==GU_BOARD_SUBSYSTEM && (C[2]>>24)==3 && !((C[3]>>16)&0x7f);
+  /* PORT-DIAG: Bus/Device/Function and subsystem pins removed; the card is
+     identified by GU_BOARD_ID, display class and header type, matching the
+     relaxed GuCheckConfig. This card lives at 0:1:0.0 on the ported host. */
+  (void)B;(void)D;(void)F;
+  return C && !S && C[0]==GU_BOARD_ID &&
+    (C[2]>>24)==3 && !((C[3]>>16)&0x7f);
 }
 BOOLEAN GuSafeToReturn(VOID) {
   return !Gu.retained && !Gu.master_attributes_pending &&
@@ -261,8 +265,11 @@ EFI_STATUS GuSavePci(VOID) {
   if(Gu.saved || Gu.fault || !Gu.owned || Gu.pcie_cap<0x40 || Gu.pcie_cap>0xd4)return EFI_NOT_READY;
   for(I=0;I<64;I++)
     if(EFI_ERROR(GuConfigRead(EfiPciIoWidthUint32,(UINT32)I*4,&Gu.saved_config[I])))return EFI_DEVICE_ERROR;
-  if(Gu.saved_config[0]!=GU_BOARD_ID || Gu.saved_config[11]!=GU_BOARD_SUBSYSTEM ||
-     (Gu.saved_config[1]&4))return EFI_ACCESS_DENIED;
+  /* PORT-DIAG: subsystem is logged, not pinned. Identity matches
+     GuTargetConfig (board ID, display class, type-0 header). Bus Master
+     must still be clear in the image that FLR restore will replay. */
+  if(!GuTargetConfig(Gu.saved_config,0,0,0,0) || (Gu.saved_config[1]&4))
+    return EFI_ACCESS_DENIED;
   if(EFI_ERROR(GuConfigRead(EfiPciIoWidthUint16,Gu.pcie_cap+8,&Gu.saved_devctl)))return EFI_DEVICE_ERROR;
   if(Gu.saved_devctl&0x8000)return EFI_NOT_READY;
   if(Gu.pcie_version>=2 && EFI_ERROR(GuConfigRead(EfiPciIoWidthUint16,

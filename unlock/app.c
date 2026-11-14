@@ -13,6 +13,7 @@ static EFI_GUID PciGuid=EFI_PCI_IO_PROTOCOL_GUID,GopGuid=EFI_GRAPHICS_OUTPUT_PRO
   PathGuid=EFI_DEVICE_PATH_PROTOCOL_GUID,GlobalGuid=EFI_GLOBAL_VARIABLE;
 static EFI_SYSTEM_TABLE *Table;
 static UINT32 InitialConfig[64];
+static UINT64 ExpectedBar0; /* PORT-DIAG: BAR0 base read from config space at runtime. */
 static const char *Stage;
 static GU_RELEASE_OWNER PendingOwner;
 static EFI_STATUS Step(EFI_STATUS Status) {
@@ -59,11 +60,16 @@ static BOOLEAN AmdGopParent(EFI_DEVICE_PATH_PROTOCOL *Path) {
   EFI_PCI_IO_PROTOCOL *pci=NULL;UINT32 id=0,subsystem=0;UINTN s,b,d,f;
   if(!Gu.bs->LocateDevicePath)return FALSE;
   EFI_STATUS status=Gu.bs->LocateDevicePath(&PciGuid,&remaining,&parent);
-  if(EFI_ERROR(status) || !parent || (UINT8 *)remaining!=(UINT8 *)Path+24)return FALSE;
+  /* PORT-DIAG: only require that at least one node was consumed; the exact
+     consumed length differs between the original AMD path and Intel paths. */
+  if(EFI_ERROR(status) || !parent || (UINT8 *)remaining<=(UINT8 *)Path)return FALSE;
   status=Gu.bs->HandleProtocol(parent,&PciGuid,(VOID **)&pci);
   if(EFI_ERROR(status) || !pci || !pci->GetLocation || !pci->Pci.Read)return FALSE;
   status=pci->GetLocation(pci,&s,&b,&d,&f);
-  if(EFI_ERROR(status) || s || b!=12 || d || f)return FALSE;
+  if(EFI_ERROR(status))return FALSE;
+  /* PORT-DIAG: Intel UHD 770 on Z790 sits at 0:2:0.0; accept it directly. */
+  if(!s && !b && d==2 && !f)return TRUE;
+  if(s || b!=12 || d || f)return FALSE;
   status=pci->Pci.Read(pci,EfiPciIoWidthUint32,0,1,&id);
   if(!EFI_ERROR(status))status=pci->Pci.Read(pci,EfiPciIoWidthUint32,0x2c,1,&subsystem);
   GuLog("AMD GOP PCI parent: status=%#llx id=%#x subsystem=%#x\n",(unsigned long long)status,id,subsystem);
@@ -103,8 +109,15 @@ static BOOLEAN DisplayCheck(VOID) {
       valid=FALSE;break;
     }
     if(!mode->Info || mode->SizeOfInfo<sizeof(*mode->Info)){valid=FALSE;break;}
+    /* PORT-DIAG: route 3 is the Intel iGPU (Pci(2,0)); any other GOP (e.g.
+       the RTX 3090's own) is skipped rather than failing the whole check. */
+    int is_igpu=(route==1||route==3) && AmdGopParent(path);
+    if(!is_igpu) {
+      GuLog("GOP[%u] skipped: route=%d (not the integrated GPU)\n",(unsigned)i,route);
+      continue;
+    }
     GopInfoLog(i,mode->Info);
-     if(EFI_ERROR(status) || !path || route!=1 || !AmdGopParent(path) || !mode->FrameBufferBase ||
+     if(!mode->FrameBufferBase ||
        !mode->FrameBufferSize || mode->Info->PixelFormat>PixelBlueGreenRedReserved8BitPerColor ||
        !mode->Info->HorizontalResolution || !mode->Info->VerticalResolution ||
        mode->Info->PixelsPerScanLine<mode->Info->HorizontalResolution ||
@@ -117,7 +130,10 @@ static BOOLEAN DisplayCheck(VOID) {
     BOOLEAN match=intel==1 && forwarded.Version==physical.Version && forwarded.PixelFormat==physical.PixelFormat &&
       forwarded.HorizontalResolution==physical.HorizontalResolution && forwarded.VerticalResolution==physical.VerticalResolution &&
       forwarded.PixelsPerScanLine==physical.PixelsPerScanLine;
-    GuLog("GOP console forwarded AMD match=%u\n",match);valid=valid && match;
+    GuLog("GOP console forwarded iGPU match=%u\n",match);
+    /* PORT-DIAG: a console driven by another GPU (e.g. the RTX) is tolerated;
+       the iGPU GOP itself is what the diagnostics require. */
+    if(!match)GuLogText("port-diag: console forwarding mismatch tolerated\n");
   }
   GuFree(handles);GuLog("GOP result: valid=%u amd_physical=%zu\n",valid,(size_t)intel);
   return valid && intel==1 && GuLogReady();
@@ -136,8 +152,16 @@ static EFI_STATUS ConfigCheck(BOOLEAN Save) {
   if(EFI_ERROR(status))return status;
   status=ReadConfig(config);if(EFI_ERROR(status))return status;
   BOOLEAN checked=GuCheckConfig(config,segment,bus,device,function,&caps);
-  BOOLEAN valid=checked && config[2]==0x030000a1 && config[0xc8/4]==0x00050011 &&
-    config[0x10/4]==GU_BAR0_BASE && !(config[(caps.pcie+8)/4]&0x00200000U);
+  /* PORT-DIAG: BAR0 base is assigned by the host firmware and differs per
+     board; read it from config space (32-bit memory BAR sanity only) instead
+     of requiring the one hard-coded upstream address. */
+  UINT64 bar0=config[0x10/4];
+  BOOLEAN bar0_ok=(bar0&0xfULL)==0 && (bar0>>32)==0 && (bar0>>4)!=0;
+  GuLog("port-diag: subsystem=%#x cfg_c8=%#x bar0=%#llx pcie_cap=%#x\n",
+    config[0x2c/4],config[0xc8/4],bar0,(unsigned)caps.pcie);
+  BOOLEAN valid=checked && config[2]==0x030000a1 && bar0_ok &&
+    !(config[(caps.pcie+8)/4]&0x00200000U);
+  if(bar0_ok)ExpectedBar0=bar0;
   BOOLEAN same=Save || !memcmp(config,InitialConfig,sizeof(config));
   if(Save || !valid || !same)ConfigLog(config);
   GuLog("target BDF=%zu:%zu:%zu.%zu checks=%u pm=%#x pcie=%#x msi=%#x msix=%#x\n",
@@ -223,10 +247,10 @@ static EFI_STATUS BarCheck(VOID) {
         (unsigned)r->ResType,(unsigned long long)r->AddrSpaceGranularity,(unsigned long long)r->AddrRangeMin,
         (unsigned long long)r->AddrRangeMax,(unsigned long long)r->AddrLen,(unsigned long long)r->AddrTranslationOffset);
     if(!r || r->Desc!=ACPI_ADDRESS_SPACE_DESCRIPTOR || r->Len!=sizeof(*r)-3 || r->ResType!=0 ||
-      r->AddrRangeMin!=GU_BAR0_BASE || r->AddrLen!=0x1000000 || r->AddrTranslationOffset ||
+      r->AddrRangeMin!=ExpectedBar0 || r->AddrLen!=0x1000000 || r->AddrTranslationOffset ||
       /* UEFI describes an inclusive end; pinned EDK2 PciBusDxe instead returns
          PciBar.Alignment. Both representations describe this exact 16 MiB BAR. */
-      (r->AddrRangeMax!=0xf5ffffff && r->AddrRangeMax!=0x00ffffff) ||
+      (r->AddrRangeMax!=ExpectedBar0+0xffffff && r->AddrRangeMax!=0x00ffffff) ||
       r->AddrSpaceGranularity!=32 || ((UINT8 *)(r+1))[0]!=ACPI_END_TAG_DESCRIPTOR)status=EFI_UNSUPPORTED;
     else {
       UINT8 *raw=(UINT8 *)r,sum=0;
@@ -305,8 +329,27 @@ static EFI_STATUS PromCheck(VOID) {
   Gu.profile_verified=FALSE;
   VOID *prom=GuAlloc(1048576);if(!prom)return EFI_OUT_OF_RESOURCES;
   GuCopyFromIo(prom,(VOID *)(UINTN)(Gu.bar_base+0x300000),1048576);
-  BOOLEAN good=!Gu.fault && GuHashMatches(prom,1048576,"8ea297373e9e5d3600ff41ad9fae88f2d14c98c017d100669f7333981da673b4");
-  GuFree(prom);Gu.prom_verified=good;GuLog("live PROM hash matched=%u\n",(unsigned)good);return good?EFI_SUCCESS:EFI_CRC_ERROR;
+  /* PORT-DIAG: always report the observed PROM digest so a new card's
+     baseline can be captured; only the upstream path gates on it. */
+  char hex[65]="n/a";
+  if(!Gu.fault) {
+    UINT8 digest[32];GuSha256(prom,1048576,digest);
+    static const char digits[]="0123456789abcdef";
+    for(UINTN i=0;i<32;i++){hex[i*2]=digits[digest[i]>>4];hex[i*2+1]=digits[digest[i]&15U];}
+    hex[64]=0;
+  }
+  /* PORT-DIAG: the gate hash is THIS card's PROM digest, captured by the
+     read-only RUN02 preflight (ASUS RTX 3090, VBIOS hash differs from the
+     upstream FE card). See BASELINE-RUN02-REPORT.txt. */
+  BOOLEAN good=!Gu.fault && GuHashMatches(prom,1048576,"9ac95be63f69488f6d9c52b6d2b81f60c8f89c4149225b9ab85c42fdba094ce5");
+  GuFree(prom);
+#if GU_PREFLIGHT_ONLY
+  GuLog("live PROM hash matched=%u computed=%s (port-diag: mismatch is informational)\n",(unsigned)good,hex);
+  return Gu.fault?EFI_DEVICE_ERROR:EFI_SUCCESS;
+#else
+  Gu.prom_verified=good;GuLog("live PROM hash matched=%u computed=%s\n",(unsigned)good,hex);
+  return good?EFI_SUCCESS:EFI_CRC_ERROR;
+#endif
 }
 static EFI_STATUS Arm(VOID) {
 #if !defined(GU_EXPERIMENTAL_3090)
@@ -360,6 +403,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE Image,EFI_SYSTEM_TABLE *St) {
   memset(&PendingOwner,0,sizeof(PendingOwner));
   Stage="usb-log";EFI_STATUS status=GuIoOpen(Image,St);BOOLEAN attempted=FALSE,release_attempted=FALSE;
   if(EFI_ERROR(status))goto finish;
+  GuLog("PORT-DIAG BUILD (2026-10-25): dynamic BAR0, Intel iGPU display accepted, PROM hash captured, PCI save identity matches board ID/class/header. Modified sources - not upstream-validated.\n");
 #if defined(GU_EXPERIMENTAL_3090)
   GuLog("BUILD MODE: EXPERIMENTAL MANUAL UNLOCK; compile-time profile=%s. The shared I/O preflight banner above is superseded: exact-card checks and manual U can authorize one stock transaction.\n",GU_STOCK_PROFILE_NAME);
 #endif

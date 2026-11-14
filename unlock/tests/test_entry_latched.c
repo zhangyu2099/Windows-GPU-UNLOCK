@@ -114,7 +114,8 @@ int main(int argc,char **argv) {
   for(unsigned i=0;i<sizeof(rejected)/sizeof(rejected[0]);i++) {
     entry_setup(rejected[i],0x03000062,7);CHECK(EFI_ERROR(run_app()));no_effects();dispose_host_fixture();
   }
-  entry_setup(APP_SUCCESS,0x03000062,7);*(UINT32 *)(config+0x2c)^=1;
+  /* Subsystem is not an identity pin. A different device ID still stops before effects. */
+  entry_setup(APP_SUCCESS,0x03000062,7);*(UINT32 *)(config+0)^=0x00010000U;
   CHECK(EFI_ERROR(run_app()));no_effects();CHECK(!GuGetEntrySelectors(&a,&b));dispose_host_fixture();
   entry_setup(APP_SUCCESS,0x03000062,7);registers[0x300000/4]^=1;
   CHECK(run_app()==EFI_CRC_ERROR);no_effects();CHECK(!GuGetEntrySelectors(&a,&b));dispose_host_fixture();

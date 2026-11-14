@@ -64,7 +64,8 @@ int main(int argc,char **argv) {
     CHECK(EFI_ERROR(result) && !Gu.armed && !Gu.owned && !Gu.started && !Gu.allocations);
     CHECK(!fake.mmio_writes && !fake.pci_writes && !fake.flrs && !fake.maps && !fake.master_enables && !fake.master_disables);
     CHECK(!disconnect_calls && !exclusive_calls && !key_calls && !attribute_enables && !prompt);
-    if(negative==0 || negative>=15)CHECK(result==EFI_NOT_READY && strstr(report_text,"baseline=UNKNOWN") && strstr(report_text,"cannot arm"));
+    /* Subsystem is not an identity pin, so a non-FE value follows the valid-card path. */
+    if(negative==0 || negative==9 || negative>=15)CHECK(result==EFI_NOT_READY && strstr(report_text,"baseline=UNKNOWN") && strstr(report_text,"cannot arm"));
     else CHECK(!strstr(report_text,"baseline=UNKNOWN"));
     CHECK(!halted);dispose_host_fixture();
   }

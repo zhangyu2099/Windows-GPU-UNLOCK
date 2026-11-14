@@ -99,8 +99,6 @@ static void TestIdentity(void) {
   static const struct { unsigned Offset, Value; const char *Name; } Mutations[] = {
     {0, 0xdf, "wrong PCI vendor rejected"},
     {2, 0x07, "wrong PCI device rejected"},
-    {0x2c, 0x63, "wrong subsystem vendor rejected"},
-    {0x2e, 0x91, "wrong subsystem device rejected"},
     {0x0b, 0x04, "non-display class rejected"},
     {0x0e, 0x81, "bridge header rejected"},
     {0x04, 0x00, "memory decode off rejected"},
@@ -117,6 +115,8 @@ static void TestIdentity(void) {
   unsigned I;
   Basic(C);
   Check(Valid(C), "minimal PM and PCIe config accepted");
+  C[0x2c / 4] = 0x87af1043;
+  Check(Valid(C), "ASUS subsystem 0x87af1043 accepted");
   C[3] = 0;
   Check(Valid(C), "single-function normal header accepted");
   for (I = 0; I < sizeof(Mutations) / sizeof(Mutations[0]); ++I) {
@@ -126,9 +126,9 @@ static void TestIdentity(void) {
   }
   Basic(C);
   Check(!GuCheckConfig(C, 1, 1, 0, 0, &Caps), "wrong segment rejected");
-  Check(!GuCheckConfig(C, 0, 2, 0, 0, &Caps), "wrong bus rejected");
-  Check(!GuCheckConfig(C, 0, 1, 1, 0, &Caps), "wrong device location rejected");
-  Check(!GuCheckConfig(C, 0, 1, 0, 1, &Caps), "wrong function location rejected");
+  Check(GuCheckConfig(C, 0, 2, 0, 0, &Caps), "bus is not an identity pin");
+  Check(GuCheckConfig(C, 0, 1, 1, 0, &Caps), "device is not an identity pin");
+  Check(GuCheckConfig(C, 0, 1, 0, 1, &Caps), "function is not an identity pin");
   Check(!GuCheckConfig(NULL, 0, 1, 0, 0, &Caps), "null config rejected");
   Check(!GuCheckConfig(C, 0, 1, 0, 0, NULL), "null output rejected");
 }
